@@ -36,7 +36,20 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
                             .dtype(dataTypeToTorchType(buffer.type()))
     );
 
+    // std::cout << "Buffer max " << hint << " : " << torch::argmax(tensor) << std::endl;
+    // if (hint != "logits")
     std::cout << "Buffer " << hint << " : " << tensor << std::endl;
+}
+
+int argmax(const Buffer& buffer) {
+
+    auto tensor = torch::from_blob(
+        buffer.data(),
+        bufferShapeToTorchShape(buffer),
+        c10::TensorOptions().device(torch::Device(torch::kCPU))
+                            .dtype(dataTypeToTorchType(buffer.type()))
+        );
+    return torch::argmax(tensor).item<int>();
 }
 
 void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName) {

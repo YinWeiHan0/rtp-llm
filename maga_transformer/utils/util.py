@@ -11,7 +11,6 @@ from typing import Optional, Union, Dict, Any, List, Set
 from maga_transformer import _ft_pickler
 from maga_transformer.device import get_current_device
 from pathlib import Path
-from easydict import EasyDict as edict
 
 class AtomicCounter:
     def __init__(self, initial: int=0):

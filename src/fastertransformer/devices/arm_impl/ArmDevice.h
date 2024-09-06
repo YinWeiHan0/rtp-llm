@@ -44,6 +44,8 @@ public:
 private:
     std::unique_ptr<IAllocator> allocator_;
     arm_compute::DataType getAclDataType(DataType type);
+    void runOneBatch(const AttentionModuleParams& params, int batch, size_t seq_len, size_t step);
+    void runOneBatchStride(const AttentionModuleParams& params, int batch, size_t seq_len, size_t step);
     void contextAttentionStride(const AttentionModuleParams& params);
     void decoderSelfAttentionStride(const AttentionModuleParams& params);
     void contextAttentionFallback(const AttentionModuleParams& params);

@@ -18,26 +18,27 @@ async def main():
     os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = f"{128 * 1024 ** 2}"
 
     model_config = ModelFactory.create_normal_model_config()
+
     model = ModelFactory.from_huggingface(model_config.ckpt_path, model_config=model_config)
     pipeline = Pipeline(model, model.tokenizer)
 
     # usual request
-    for res in pipeline("<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n", max_new_tokens = 100):
+    for res in pipeline("<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n", max_new_tokens = 20):
         print(res.generate_texts)
 
     # openai request
-    openai_endpoint = OpenaiEndopoint(model)
-    messages = [
-        ChatMessage(**{
-            "role": RoleEnum.user,
-            "content": "你是谁？",
-        }),
-    ]
-    request = ChatCompletionRequest(messages=messages, stream=False)
-    response = openai_endpoint.chat_completion(request_id=0, chat_request=request, raw_request=None)
-    async for res in response:
-        pass
-    print((await response.gen_complete_response_once()).model_dump_json(indent=4))
+    # openai_endpoint = OpenaiEndopoint(model)
+    # messages = [
+    #     ChatMessage(**{
+    #         "role": RoleEnum.user,
+    #         "content": "你是谁？",
+    #     }),
+    # ]
+    # request = ChatCompletionRequest(messages=messages, stream=False)
+    # response = openai_endpoint.chat_completion(request_id=0, chat_request=request, raw_request=None)
+    # async for res in response:
+    #     pass
+    # print((await response.gen_complete_response_once()).model_dump_json(indent=4))
 
     pipeline.stop()
 

@@ -222,6 +222,10 @@ void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
     auto& tokens = params.token_ids;
     // auto transposed_tokens = transpose({*device_tokens});
 
+    int id = argmax(logits);
+    *(tokens.dataWithOffset<int32_t>(step)) = id;
+    printf("step %d id %d\n", step, id);
+
     // 1. prepare buffers
     auto& top_k = params.top_k;
     auto& top_p = params.top_p;
@@ -334,7 +338,6 @@ void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
                max_top_k,
                top_k.data<uint32_t>());
 
-    printBufferData(tokens, "before topk_sampling", nullptr, true);
 
     topk_sampling(batch_size, topk_logs_indices, topk_logs, generator_lists,
                   tokens.data<int32_t>(),
@@ -352,8 +355,6 @@ void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
                   vocab_size_padded,
                   skip_top_k_decode_buf->data<bool>(),
                   step + 1);
-
-    // printBufferData(tokens, "output_token_ids", nullptr, true);
 
     return;
 }
