@@ -17,7 +17,10 @@ namespace fastertransformer {
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr ArmCpuDevice::gemm(const GemmParams& params) {
-        return gemm_opt(params);
+        if (params.transB == TransposeOperation::TRANSPOSE)
+            return gemm_opt(params);
+        else
+            return gemm_kai_fp32(params);
 }
 
 

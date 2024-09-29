@@ -146,6 +146,13 @@ def git_deps():
         shallow_since = "1518192000 +0800",
     )
 
+    new_git_repository(
+        name = "KleidiAI",
+        remote = "https://git.gitlab.arm.com/kleidi/kleidiai.git",
+        commit = "93f5f2fdd25b263bb1cfe403b179348906b60b15",
+        # patches = ["//patches/kleidiai:0001-fix-bf16-bazel-build-path.patch"],
+    )
+
     http_archive(
         name = "boringssl",
         sha256 = "1188e29000013ed6517168600fc35a010d58c5d321846d6a6dfee74e4c788b45",

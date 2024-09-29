@@ -19,6 +19,7 @@ cc_library(
         "@arm_compute//arm_compute:core_headers",
         "@arm_compute//arm_compute:runtime_headers",
         "@arm_compute//support",
+        "@KleidiAI//kai/ukernels/matmul",
     ],
     visibility = ["//visibility:public"],
     copts = copts() + [
