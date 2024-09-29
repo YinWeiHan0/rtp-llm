@@ -129,7 +129,7 @@ BufferPtr ArmCpuDevice::gemm_kai_fp32(const GemmParams& params) {
 
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();
-    printf("gemm_kai_fp32 m,n,k %ld %ld %ld %d %d %d %d %.3f\n", m, n, k, params.A.type(), params.B.type(), output->type(), params.compute_type, during_time * 1000);
+    printf("gemm_kai_fp32 m,n,k %ld %ld %ld %.3f\n", m, n, k, during_time * 1000);
     return output;
 }
 
@@ -254,7 +254,7 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
             ((uint8_t *)dst + dst_offset),                      // DST
             dst_stride_row,           // DST stride (row)
             dst_stride_col,           // DST stride (col)
-            FLT_MIN, FLT_MAX  // Min and max for the clamp operation
+            -FLT_MAX, FLT_MAX   // Min and max for the clamp operation
     );
     
     // parallel_gemm_kai_bf16(m, n, k, lhs, rhs_packed, dst, lhs_stride, n, dst_stride_row);
@@ -265,7 +265,7 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
 
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();
-    printf("gemm_kai_bf16 m,n,k %ld %ld %ld %d %d %d %d %.3f\n", m, n, k, params.A.type(), params.B.type(), output->type(), params.compute_type, during_time * 1000);
+    printf("gemm_kai_bf16 m,n,k %ld %ld %ld %.3f\n", m, n, k, during_time * 1000);
     return output;
 }
 
