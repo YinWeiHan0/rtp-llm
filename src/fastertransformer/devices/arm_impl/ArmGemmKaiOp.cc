@@ -219,14 +219,23 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
     float* lhs = (float* )params.A.data();
 
     // Packing only needs to be performed once if the contents of the bias and RHS matrices are expected to be constant.
-    kai_run_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(
-        1, n, k, nr, kr, sr,  // Packing arguments
-        rhs_stride,           // RHS stride
-        rhs,                  // RHS
-        bias,                 // Bias
-        NULL,                 // Scale
-        rhs_packed,           // RHS packed
-        0, NULL);
+    int n_step = nr;
+    #pragma omp parallel for
+    for (int n_start = 0; n_start < n; n_start += n_step) {
+        const size_t rhs_offset = kai_get_rhs_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
+        const size_t bias_offset = kai_get_bias_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
+        const size_t packed_offset =kai_get_rhs_packed_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start, k);
+
+        int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
+        kai_run_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(
+            1, tile_n, k, nr, kr, sr,  // Packing arguments
+            rhs_stride,           // RHS stride
+            ((uint8_t*)rhs + rhs_offset),                  // RHS
+            ((uint8_t*)bias + bias_offset),                 // Bias
+            NULL,                 // Scale
+            ((uint8_t*)rhs_packed + packed_offset),           // RHS packed
+            0, NULL);
+    }
 
     float* dst = (float* )output->data();
 
@@ -235,7 +244,6 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
     for (int m_start = 0; m_start < m; m_start += m_step) {
         const size_t lhs_offset = kai_get_lhs_offset_lhs_pack_8x4_f32_bf16_neon(m_start, lhs_stride);
         const size_t lhs_packed_offset = kai_get_lhs_packed_offset_lhs_pack_8x4_f32_bf16_neon(m_start, k, mr, kr, sr);
-        // last tile m
         int tile_m = (m_start + m_step <= m) ? m_step : m - m_start;
 
         kai_run_lhs_pack_8x4_f32_bf16_neon(
@@ -246,7 +254,6 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
             ((uint8_t*)lhs_packed + lhs_packed_offset));
     }
 
-    int n_step = nr;
     #pragma omp parallel for
     for (int n_start = 0; n_start < n; n_start += n_step) {
         size_t lhs_offset = kai_get_lhs_offset_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla(0, k);
@@ -260,7 +267,6 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
         assert(n % n_step == 0);
         assert(n_step % n_step == 0);
 
-        // last tile n
         int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
         kai_run_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla(
             m, tile_n, k,                  // Dimensions
