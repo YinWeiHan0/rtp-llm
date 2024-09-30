@@ -230,15 +230,8 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
 
     float* dst = (float* )output->data();
 
-    // Number of rows i-th thread will process
-    // int Mi;
-    // if (num_rows_per_thread > m) Mi = KAI_MIN(num_rows_per_thread, num_rows_per_thread - m);
-    // else Mi = KAI_MIN(num_rows_per_thread, m - num_rows_per_thread);
-    // int Mi = KAI_MIN(num_rows_per_thread, num_rows_per_thread - m);
-    // if (Mi < 0) Mi = 0;
-
     const size_t lhs_offset = kai_get_lhs_packed_offset_lhs_pack_8x4_f32_bf16_neon(0, k, mr, kr, sr);
-    const size_t dst_offset = 0 * dst_stride_row;
+    // const size_t dst_offset = 0 * dst_stride_row;
     kai_run_lhs_pack_8x4_f32_bf16_neon(
         m, k, mr, kr, sr,
         0 /* m_idx_start; should stay as 0 */,
@@ -246,16 +239,43 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
         lhs_stride,
         ((uint8_t*)lhs_packed + lhs_offset));
 
-    kai_run_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla(
-            m, n, k,                  // Dimensions
-            ((uint8_t*)lhs_packed + lhs_offset),                      // LHS
+    int n_step = 12;
+    #pragma omp parallel for
+    for (int n_start = 0; n_start < n; n_start += n_step) {
+        size_t lhs_offset = kai_get_lhs_offset_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla(0, k);
+        size_t rhs_offset = kai_get_rhs_packed_offset_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla(n_start, k);
+        size_t dst_offset = kai_get_dst_offset_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla(0, n_start, n * sizeof(bfloat16_t));
+
+        const void* lhs_ptr = (const void*)((const char *)lhs_packed + lhs_offset);
+        const void* rhs_ptr = (const void*)((const char *)rhs_packed + rhs_offset);
+        void* dst_ptr = (void*)((uint8_t*)dst + dst_offset);
+
+        assert(n % n_step == 0);
+        assert(n_step % n_step == 0);
+
+        // last tile n
+        int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
+        kai_run_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla(
+            m, tile_n, k,                  // Dimensions
+            lhs_ptr,                      // LHS
             0,               // LHS stride
-            rhs_packed,               // RHS packed
-            ((uint8_t *)dst + dst_offset),                      // DST
+            rhs_ptr,               // RHS packed
+            dst_ptr,                      // DST
             dst_stride_row,           // DST stride (row)
             dst_stride_col,           // DST stride (col)
             -FLT_MAX, FLT_MAX   // Min and max for the clamp operation
-    );
+        );
+    }
+    // kai_run_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla(
+    //         m, n, k,                  // Dimensions
+    //         ((uint8_t*)lhs_packed + lhs_offset),                      // LHS
+    //         0,               // LHS stride
+    //         rhs_packed,               // RHS packed
+    //         ((uint8_t *)dst + dst_offset),                      // DST
+    //         dst_stride_row,           // DST stride (row)
+    //         dst_stride_col,           // DST stride (col)
+    //         -FLT_MAX, FLT_MAX   // Min and max for the clamp operation
+    // );
     
     // parallel_gemm_kai_bf16(m, n, k, lhs, rhs_packed, dst, lhs_stride, n, dst_stride_row);
 
