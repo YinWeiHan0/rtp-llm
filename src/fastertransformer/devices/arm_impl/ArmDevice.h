@@ -26,7 +26,7 @@ public:
     BufferPtr gemm(const GemmParams& params) override;
     BufferPtr gemm_acl(const GemmParams& params);
     BufferPtr gemm_opt(const GemmParams& params);
-    BufferPtr gemm_kai_bf16(const GemmParams& params);
+    BufferPtr gemm_kai_bf16(const GemmParams& params, bool isRhsPacked = true);
     BufferPtr gemm_kai_fp32(const GemmParams& params);
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;

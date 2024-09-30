@@ -17,10 +17,8 @@ namespace fastertransformer {
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr ArmCpuDevice::gemm(const GemmParams& params) {
-        if (params.transB == TransposeOperation::TRANSPOSE)
-            return gemm_opt(params);
-        else
-            return gemm_kai_fp32(params);
+    // return gemm_opt(params);
+    return gemm_kai_bf16(params);
 }
 
 
@@ -33,8 +31,9 @@ BufferPtr ArmCpuDevice::gemm_opt(const GemmParams& params) {
 
 #ifdef GEMM_DEBUG
     Timer timer;
-    auto start = std::chrono::high_resolution_clock::now();
+    
 #endif
+    auto start = std::chrono::high_resolution_clock::now();
 
     params.check();
 
@@ -170,10 +169,11 @@ BufferPtr ArmCpuDevice::gemm_opt(const GemmParams& params) {
             return nullptr;
         }
     }
-#ifdef GEMM_DEBUG
+
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();
     printf("gemm_opt b,m,n,k %ld %ld %ld %ld %.3f\n", batch_size, m, n, k, during_time * 1000);
+#ifdef GEMM_DEBUG
 #endif
     return output;
 }

@@ -138,7 +138,7 @@ BufferPtr ArmCpuDevice::gemm_kai_fp32(const GemmParams& params) {
 ///          A [b, ..., m, k]
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
-BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
+BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked) {
 
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -199,11 +199,8 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
     // In a single row, we pack nr bias values followed by K rows of nr RHS values
     const size_t rhs_packed_size = kai_get_rhs_packed_size_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n, k);
 
-    bfloat16_t* rhs_packed = new bfloat16_t[rhs_packed_size];
-
-    const size_t bias_size = n;
-    float* bias = new float[bias_size];
-    memset(bias, 0, bias_size * sizeof(float));
+    bfloat16_t* rhs_packed;
+    float* bias;
 
     const size_t lhs_stride = k * sizeof(float);
     const size_t rhs_stride = n * sizeof(float);
@@ -220,21 +217,30 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
 
     // Packing only needs to be performed once if the contents of the bias and RHS matrices are expected to be constant.
     int n_step = nr;
-    #pragma omp parallel for
-    for (int n_start = 0; n_start < n; n_start += n_step) {
-        const size_t rhs_offset = kai_get_rhs_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
-        const size_t bias_offset = kai_get_bias_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
-        const size_t packed_offset =kai_get_rhs_packed_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start, k);
+    if (!isRhsPacked) {
+        rhs_packed = new bfloat16_t[rhs_packed_size];
+        const size_t bias_size = n;
+        bias = new float[bias_size];
+        memset(bias, 0, bias_size * sizeof(float));
 
-        int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
-        kai_run_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(
-            1, tile_n, k, nr, kr, sr,  // Packing arguments
-            rhs_stride,           // RHS stride
-            ((uint8_t*)rhs + rhs_offset),                  // RHS
-            ((uint8_t*)bias + bias_offset),                 // Bias
-            NULL,                 // Scale
-            ((uint8_t*)rhs_packed + packed_offset),           // RHS packed
-            0, NULL);
+        #pragma omp parallel for
+        for (int n_start = 0; n_start < n; n_start += n_step) {
+            const size_t rhs_offset = kai_get_rhs_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
+            const size_t bias_offset = kai_get_bias_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
+            const size_t packed_offset =kai_get_rhs_packed_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start, k);
+
+            int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
+            kai_run_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(
+                1, tile_n, k, nr, kr, sr,  // Packing arguments
+                rhs_stride,           // RHS stride
+                ((uint8_t*)rhs + rhs_offset),                  // RHS
+                ((uint8_t*)bias + bias_offset),                 // Bias
+                NULL,                 // Scale
+                ((uint8_t*)rhs_packed + packed_offset),           // RHS packed
+                0, NULL);
+        }
+    } else {
+        rhs_packed = (bfloat16_t* )params.B.data();
     }
 
     float* dst = (float* )output->data();
@@ -280,9 +286,11 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params) {
         );
     }
 
-    delete[] bias;
-    delete[] rhs_packed;
     delete[] lhs_packed;
+    if (!isRhsPacked) {
+        delete[] bias;
+        delete[] rhs_packed;
+    }
 
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();

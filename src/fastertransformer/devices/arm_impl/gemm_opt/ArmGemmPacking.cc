@@ -13,26 +13,26 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/arm_impl/ArmDevice.h"
 #include "src/fastertransformer/models/W.h"
+#include "kai/ukernels/matmul/matmul_clamp_bf16_bf16_f32p/kai_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla.h"
+#include "kai/ukernels/matmul/matmul_clamp_bf16_bf16_f32p/kai_matmul_clamp_bf16_bf16_f32p_interface.h"
+#include "kai/ukernels/matmul/pack/kai_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12.h"
 
 namespace fastertransformer {
 
 ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
     // Transpose and reorder
-    // if (key == W::lm_head) {
-    //     return transposeWeight(input);
-    // }
     if (key == W::lm_head) {
-        return prepareGemmOptWeight(transposeWeight(input), true);
+        return prepareKaiWeightBf16(transposeWeight(input), true);
     }
 
-    // // Reorder RHS weight matrics for better GEMM performance
-    // if (key == W::attn_qkv_w ||
-    //     key == W::attn_o_w ||
-    //     key == W::ffn_w1 ||
-    //     key == W::ffn_w2 ||
-    //     key == W::ffn_w3) {
-    //     return prepareGemmOptWeight(input);
-    // }
+    // Reorder RHS weight matrics for better GEMM performance
+    if (key == W::attn_qkv_w ||
+        key == W::attn_o_w ||
+        key == W::ffn_w1 ||
+        key == W::ffn_w2 ||
+        key == W::ffn_w3) {
+        return prepareKaiWeightBf16(input);
+    }
 
     return input;
 }
@@ -89,6 +89,65 @@ BufferPtr transposeWeight(ConstBufferPtr input) {
     transB.run();
 
     return output;
+}
+
+BufferPtr prepareKaiWeightBf16(ConstBufferPtr input, bool isTranspose) {
+
+        std::vector<size_t> Bshape = input->shape();
+        auto dim = input->dim();
+        size_t k;
+        size_t n;
+
+        k = Bshape[dim - 2];
+        n = Bshape[dim - 1];
+
+        const size_t nr = kai_get_nr_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla();
+        const size_t kr = kai_get_kr_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla();
+        const size_t sr = kai_get_sr_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla();
+
+        // In a single row, we pack nr bias values followed by K rows of nr RHS values
+        const size_t rhs_packed_size = kai_get_rhs_packed_size_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n, k);
+
+        bfloat16_t* rhs_packed = new bfloat16_t[rhs_packed_size];
+
+        std::vector<size_t> weight_workspace_shape = std::vector<size_t>(Bshape.begin(), Bshape.end() - 2);
+
+        if (isTranspose)
+                weight_workspace_shape.insert(weight_workspace_shape.end(), {n, k});
+        else
+                weight_workspace_shape.insert(weight_workspace_shape.end(), {k, n});
+        BufferPtr output = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                        DataType::TYPE_BF16,
+                                                        weight_workspace_shape,
+                                                        rhs_packed));
+
+        float* bias = new float[n];
+        memset(bias, 0, sizeof(float) * n);
+
+        const size_t rhs_stride = n * sizeof(float);
+        float* rhs = (float* )input->data();
+
+        // Packing only needs to be performed once if the contents of the bias and RHS matrices are expected to be constant.
+        int n_step = nr;
+        #pragma omp parallel for
+        for (int n_start = 0; n_start < n; n_start += n_step) {
+            const size_t rhs_offset = kai_get_rhs_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
+            const size_t bias_offset = kai_get_bias_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
+            const size_t packed_offset = kai_get_rhs_packed_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start, k);
+
+            int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
+            kai_run_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(
+                1, tile_n, k, nr, kr, sr,  // Packing arguments
+                rhs_stride,           // RHS stride
+                ((uint8_t*)rhs + rhs_offset),                  // RHS
+                ((uint8_t*)bias + bias_offset),                 // Bias
+                NULL,                 // Scale
+                ((uint8_t*)rhs_packed + packed_offset),           // RHS packed
+                0, NULL);
+        }
+
+        delete[] bias;
+        return output;
 }
 
 BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose) {
