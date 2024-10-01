@@ -18,7 +18,9 @@ namespace fastertransformer {
 ///          C [b, ..., m, n]
 BufferPtr ArmCpuDevice::gemm(const GemmParams& params) {
     // return gemm_opt(params);
-    return gemm_kai_bf16(params);
+    // return gemm_kai_fp32(params);
+    // return gemm_kai_bf16(params, false);
+    return gemm_kai_a8w4_1x4(params);
 }
 
 

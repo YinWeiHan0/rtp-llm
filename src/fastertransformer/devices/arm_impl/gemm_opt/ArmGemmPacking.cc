@@ -21,17 +21,21 @@ namespace fastertransformer {
 
 ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
     // Transpose and reorder
-    if (key == W::lm_head) {
-        return prepareKaiWeightBf16(transposeWeight(input), true);
-    }
+    // if (key == W::lm_head) {
+    //     return transposeWeight(input);
+    // }
+    // if (key == W::lm_head) {
+    //     return prepareKaiWeightBf16(transposeWeight(input), true);
+    // }
 
-    // Reorder RHS weight matrics for better GEMM performance
+    // // Reorder RHS weight matrics for better GEMM performance
     if (key == W::attn_qkv_w ||
         key == W::attn_o_w ||
         key == W::ffn_w1 ||
         key == W::ffn_w2 ||
         key == W::ffn_w3) {
-        return prepareKaiWeightBf16(input);
+        return transposeWeight(input);
+    //     return prepareKaiWeightBf16(input);
     }
 
     return input;
@@ -69,8 +73,8 @@ BufferPtr transposeWeight(ConstBufferPtr input) {
     wei_tran_info = arm_compute::TensorInfo(arm_compute::TensorShape(k, n), 1, acl_data_type);
 
     std::vector<size_t> weight_workspace_shape = std::vector<size_t>(Bshape.begin(), Bshape.end() - 2);
-    weight_workspace_shape.insert(weight_workspace_shape.end(), {n, k});
-    // weight_workspace_shape.insert(weight_workspace_shape.end(), {k, n});
+    // weight_workspace_shape.insert(weight_workspace_shape.end(), {n, k});
+    weight_workspace_shape.insert(weight_workspace_shape.end(), {k, n});
 
     size_t element_num = k * n;
     size_t data_size = data_type == DataType::TYPE_FP32 ? sizeof(float) : sizeof(float16_t);

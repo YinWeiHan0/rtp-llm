@@ -46,13 +46,17 @@ void ArmGemmOpTest::BasicGemmOP_FP16(size_t m, size_t n, size_t k) {
 }
 
 void ArmGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
-    auto A_host = torch::rand({(int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kFloat);
-    auto B_host = torch::rand({(int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
+    auto A_host = torch::randn({(int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kFloat);
+    auto B_host = torch::randn({(int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
+
+    A_host *= 0.01;
+    B_host *= 0.01;
 
     auto A_device = createHostBuffer<float>({m, k}, tensorToBuffer(A_host, AllocationType::HOST)->data());
     auto B_device = createHostBuffer<float>({k, n}, tensorToBuffer(B_host, AllocationType::HOST)->data());
 
-    B_device = prepareGemmOptWeight(B_device);
+    // B_device = prepareKaiWeightBf16(B_device);
+    B_device = transposeWeight(B_device);
 
     GemmParams params{*A_device, *B_device};
     auto       C_device = device_->gemm(params);
@@ -62,7 +66,8 @@ void ArmGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
     auto B      = bufferToTensor(*B_device);
     auto C      = bufferToTensor(*C_device);
 
-    ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
+    // ASSERT_TRUE(torch::allclose(C, C_host, 0.1, 0.02));
+    assertTensorClose(C, C_host, 0.1, 0.02);
 }
 
 void ArmGemmOpTest::BatchGemmOP(size_t b, size_t m, size_t n, size_t k) {

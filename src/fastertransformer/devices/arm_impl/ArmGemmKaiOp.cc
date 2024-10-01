@@ -16,7 +16,77 @@
 #include "kai/ukernels/matmul/pack/kai_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12.h"
 #include "kai/ukernels/matmul/pack/kai_lhs_pack_8x4_f32_bf16_neon.h"
 
+#include "kai/ukernels/matmul/pack/kai_lhs_quant_pack_qsi8d32p_f32.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p4x8_qsi4c32p4x8_8x4x32_neon_i8mm.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p_qsi4c32p_interface.h"
+#include "kai/ukernels/matmul/pack/kai_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0.h"
+
 namespace fastertransformer {
+
+static inline size_t num_blocks_per_row(size_t k, size_t bl) {
+    return k / bl;
+}
+
+static inline size_t num_bytes_per_block_qs4c32(size_t bl) {
+    return (bl / 2) + sizeof(int16_t);
+}
+
+static void quant_qs4c32_f32(size_t n, size_t k, size_t bl, const float* rhs_f32, uint8_t* rhs_qs4c32) {
+    const size_t num_blocks_row = num_blocks_per_row(k, bl);
+    const size_t num_bytes_block = num_bytes_per_block_qs4c32(bl);
+    const size_t dst_stride = num_blocks_row * num_bytes_block;
+
+    for (size_t row_idx = 0; row_idx < n; ++row_idx) {
+        const float* src_ptr = rhs_f32 + row_idx * k;
+
+        uint8_t* dst_ptr = (uint8_t*)rhs_qs4c32 + row_idx * dst_stride;
+
+        for (size_t block_idx = 0; block_idx < num_blocks_row; ++block_idx) {
+            float amax = 0.0f;
+            float max = 0.0f;
+
+            for (size_t b = 0; b < bl; ++b) {
+                const float src0_0 = src_ptr[block_idx * bl + b];
+                const float asrc0_0 = fabsf(src0_0);
+
+                if (amax < asrc0_0) {
+                    amax = asrc0_0;
+                    max = src0_0;
+                }
+            }
+
+            const float scale = max / -8.0;
+            const float recip_scale = scale ? 1.0f / scale : 0.0f;
+
+            // Store the scale at the beginning of the block
+            *((uint16_t*)dst_ptr) = kai_cast_f16_f32(scale);
+            dst_ptr += sizeof(uint16_t);
+
+            const size_t block_size = 32;
+            const size_t num_subblocks = bl / 32;
+
+            for (size_t subblock_idx = 0; subblock_idx < num_subblocks; ++subblock_idx) {
+                for (size_t i = 0; i < block_size / 2; ++i) {
+                    const size_t src_base_addr = block_idx * bl + i + subblock_idx * block_size;
+                    float v0_f32 = src_ptr[src_base_addr];
+                    float v1_f32 = src_ptr[src_base_addr + block_size / 2];
+
+                    v0_f32 *= recip_scale;
+                    v1_f32 *= recip_scale;
+
+                    const uint8_t v0_u8 = (uint8_t)std::min((int8_t)15, (int8_t)(v0_f32 + 8.5f));
+                    const uint8_t v1_u8 = (uint8_t)std::min((int8_t)15, (int8_t)(v1_f32 + 8.5f));
+
+                    const uint8_t rhs_v0 = (v1_u8 << 4) | v0_u8;
+
+                    dst_ptr[0] = rhs_v0;
+                    dst_ptr += sizeof(uint8_t);
+                }
+            }
+        }
+    }
+}
 
 BufferPtr ArmCpuDevice::gemm_kai_fp32(const GemmParams& params) {
 
@@ -196,9 +266,6 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked
     const size_t kr = kai_get_kr_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla();
     const size_t sr = kai_get_sr_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla();
 
-    // In a single row, we pack nr bias values followed by K rows of nr RHS values
-    const size_t rhs_packed_size = kai_get_rhs_packed_size_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n, k);
-
     bfloat16_t* rhs_packed;
     float* bias;
 
@@ -208,7 +275,6 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked
     const size_t dst_stride_col = sizeof(float);
 
     const size_t lhs_packed_size = kai_get_lhs_packed_size_lhs_pack_8x4_f32_bf16_neon(m, k, mr, kr, sr);
-
     bfloat16_t *lhs_packed = new bfloat16_t[lhs_packed_size];
 
     // float* rhs_packed = (float* )params.B.data();
@@ -218,7 +284,9 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked
     // Packing only needs to be performed once if the contents of the bias and RHS matrices are expected to be constant.
     int n_step = nr;
     if (!isRhsPacked) {
+        const size_t rhs_packed_size = kai_get_rhs_packed_size_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n, k);
         rhs_packed = new bfloat16_t[rhs_packed_size];
+
         const size_t bias_size = n;
         bias = new float[bias_size];
         memset(bias, 0, bias_size * sizeof(float));
@@ -295,6 +363,145 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();
     printf("gemm_kai_bf16 m,n,k %ld %ld %ld %.3f\n", m, n, k, during_time * 1000);
+    return output;
+}
+
+BufferPtr ArmCpuDevice::gemm_kai_a8w4_1x4(const GemmParams& params) {
+
+    auto start = std::chrono::high_resolution_clock::now();
+    params.check();
+
+    std::vector<size_t> Ashape;
+    std::vector<size_t> Bshape;
+    std::vector<size_t> Dshape;
+
+    size_t dim;
+    size_t m;
+    size_t k;
+    size_t n;
+
+    Ashape = params.A.shape();
+    Bshape = params.B.shape();
+
+    dim        = params.A.dim();
+
+    if (params.transA == TransposeOperation::TRANSPOSE) {
+        std::iter_swap(Ashape.end() - 1, Ashape.end() - 2);
+    }
+
+    if (params.transB == TransposeOperation::TRANSPOSE) {
+        std::iter_swap(Bshape.end() - 1, Bshape.end() - 2);
+    }
+
+    m = Ashape[dim - 2];
+    k = Ashape[dim - 1];
+    n = Bshape[dim - 1];
+
+    auto data_type = params.compute_type == DataType::TYPE_INVALID ? params.A.type() : params.compute_type;
+    if (data_type != params.A.type()) {
+        std::cout << "[Warning] GEMM compute type differs from input type. Not supported" << std::endl;
+        data_type = params.A.type();
+    }
+
+    if (data_type != DataType::TYPE_FP32) {
+        std::cout << "[Warning] GEMM data_type not TYPE_FP32. Not supported" << std::endl;
+    }
+
+    Dshape = std::vector<size_t>(Ashape.begin(), Ashape.end() - 2);
+    Dshape.insert(Dshape.end(), {m, n});
+
+    BufferPtr output;
+    if (params.D) {
+        output = params.D;
+        RUNTIME_ASSERT_OP_ARG((data_type == params.D->type()) && (Dshape == params.D->shape()),
+                              "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
+                              data_type,
+                              autil::StringUtil::toString(Dshape).c_str(),
+                              params.D->debugString().c_str());
+    } else {
+        output = allocateBuffer({data_type, Dshape, AllocationType::DEVICE}, {"gemm_output"});
+    }
+
+    const size_t mr = kai_get_mr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+    const size_t nr = kai_get_nr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+    const size_t kr = kai_get_kr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+    const size_t sr = kai_get_sr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+
+    const size_t lhs_stride = k * sizeof(float);
+    // const size_t rhs_stride = n * sizeof(float);
+    const size_t dst_stride_row = n * sizeof(float);
+    const size_t dst_stride_col = sizeof(float);
+
+    const size_t bl = 32;
+    const size_t num_blocks = k / bl;
+    const size_t num_bytes_per_block_qs4c32 = (bl / 2) + sizeof(int16_t);
+    const size_t rhs_native_size_qs4c32 = n * num_blocks * num_bytes_per_block_qs4c32;
+
+    const size_t lhs_packed_size = kai_get_lhs_packed_size_lhs_quant_pack_qsi8d32p_f32(m, k, bl, mr, kr, sr);
+    uint8_t* lhs_packed_mtx_qs8d32 = new uint8_t[lhs_packed_size];
+
+    const size_t rhs_packed_size =
+            kai_get_rhs_packed_size_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n, k, nr, kr, bl);
+    uint8_t* rhs_packed_mtx_qs4c32 = new uint8_t[rhs_packed_size];
+
+    float* lhs = (float* )params.A.data();
+    float* rhs = (float* )params.B.data();
+
+    // uint8_t* rhs_packed = (uint8_t* )params.B.data();
+
+    uint8_t* rhs_native_mtx_qs4c32 = new uint8_t[rhs_native_size_qs4c32];
+
+    quant_qs4c32_f32(
+        n, k, bl, (const float*)rhs, (uint8_t*)rhs_native_mtx_qs4c32);
+
+    struct kai_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0_params kai_rhs_params;
+    kai_rhs_params.lhs_zero_point = 1;
+    kai_rhs_params.rhs_zero_point = 8;
+    // RHS packing
+    kai_run_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(
+        1, n, k,                                  // Dimensions
+        nr, kr, sr,                               // Packing arguments
+        bl,                                       // Block length
+        (const uint8_t*)(rhs_native_mtx_qs4c32),  // RHS
+        NULL,                                     // Bias
+        rhs_packed_mtx_qs4c32,                    // RHS packed
+        0, &kai_rhs_params);
+
+    // LHS packing
+    kai_run_lhs_quant_pack_qsi8d32p_f32(
+        m, k, bl, mr, kr, sr, 0,               // Packing arguments
+        (const float*)lhs,                  // LHS
+        lhs_stride,                 // LHS stride
+        lhs_packed_mtx_qs8d32);             // LHS packed
+
+    // Matmul
+    const size_t dst_stride = n * sizeof(float);
+    const size_t lhs_offset = kai_get_lhs_packed_offset_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(0, k, bl);
+    const size_t rhs_offset = kai_get_rhs_packed_offset_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(0, k, bl);
+    const size_t dst_offset = kai_get_dst_offset_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(0, 0, dst_stride); // FIXME with dst_stride?
+
+    const void* lhs_ptr = (const void*)((const char *)lhs_packed_mtx_qs8d32 + lhs_offset);
+    const void* rhs_ptr = (const void*)((const char *)rhs_packed_mtx_qs4c32 + rhs_offset);
+    float* dst_ptr = (float*)((uint8_t*)output->data() + dst_offset);
+
+    kai_run_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(
+        m, n, k,           // Dimensions
+        bl,
+        lhs_ptr,           // LHS packed
+        rhs_ptr,           // RHS packed
+        dst_ptr,           // DST
+        dst_stride_row,        // DST stride (row)
+        dst_stride_col,     // DST stride (col)
+        -FLT_MAX, FLT_MAX  // Min and max for the clamp operation
+    );
+
+    delete[] lhs_packed_mtx_qs8d32;
+    delete[] rhs_packed_mtx_qs4c32;
+    delete[] rhs_native_mtx_qs4c32;
+
+    auto end = std::chrono::high_resolution_clock::now();
+    float during_time = std::chrono::duration<float>(end - start).count();
+    printf("gemm_kai_a8w4_1x4 m,n,k %ld %ld %ld %.3f\n", m, n, k, during_time * 1000);
     return output;
 }
 
