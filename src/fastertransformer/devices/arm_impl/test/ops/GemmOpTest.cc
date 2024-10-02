@@ -56,17 +56,14 @@ void ArmGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
     auto B_device = createHostBuffer<float>({k, n}, tensorToBuffer(B_host, AllocationType::HOST)->data());
 
     // B_device = prepareKaiWeightBf16(B_device);
-    B_device = transposeWeight(B_device);
+    B_device = prepareKaiWeightA8w4_1x4(transposeWeight(B_device));
 
     GemmParams params{*A_device, *B_device};
     auto       C_device = device_->gemm(params);
 
     auto C_host = torch::matmul(A_host, B_host).to(torch::kFloat);
-    auto A      = bufferToTensor(*A_device);
-    auto B      = bufferToTensor(*B_device);
     auto C      = bufferToTensor(*C_device);
 
-    // ASSERT_TRUE(torch::allclose(C, C_host, 0.1, 0.02));
     assertTensorClose(C, C_host, 0.1, 0.02);
 }
 

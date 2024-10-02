@@ -11,6 +11,7 @@ ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input);
 BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose = false);
 BufferPtr transposeWeight(ConstBufferPtr input);
 BufferPtr prepareKaiWeightBf16(ConstBufferPtr input, bool isTranspose = false);
+BufferPtr prepareKaiWeightA8w4_1x4(ConstBufferPtr input, bool isTranspose = false);
 
 template<typename Ta, typename Tb, typename Tc, typename Tp>
 class GemmPartParam {

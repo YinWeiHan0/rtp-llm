@@ -17,16 +17,84 @@
 #include "kai/ukernels/matmul/matmul_clamp_bf16_bf16_f32p/kai_matmul_clamp_bf16_bf16_f32p_interface.h"
 #include "kai/ukernels/matmul/pack/kai_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12.h"
 
+#include "kai/ukernels/matmul/pack/kai_lhs_quant_pack_qsi8d32p_f32.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p4x8_qsi4c32p4x8_8x4x32_neon_i8mm.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p_qsi4c32p_interface.h"
+#include "kai/ukernels/matmul/pack/kai_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0.h"
+
+
 namespace fastertransformer {
+
+static inline size_t num_blocks_per_row(size_t k, size_t bl) {
+    return k / bl;
+}
+
+static inline size_t num_bytes_per_block_qs4c32(size_t bl) {
+    return (bl / 2) + sizeof(int16_t);
+}
+
+static void quant_qs4c32_f32(size_t n, size_t k, size_t bl, const float* rhs_f32, uint8_t* rhs_qs4c32) {
+    const size_t num_blocks_row = num_blocks_per_row(k, bl);
+    const size_t num_bytes_block = num_bytes_per_block_qs4c32(bl);
+    const size_t dst_stride = num_blocks_row * num_bytes_block;
+
+    for (size_t row_idx = 0; row_idx < n; ++row_idx) {
+        const float* src_ptr = rhs_f32 + row_idx * k;
+
+        uint8_t* dst_ptr = (uint8_t*)rhs_qs4c32 + row_idx * dst_stride;
+
+        for (size_t block_idx = 0; block_idx < num_blocks_row; ++block_idx) {
+            float amax = 0.0f;
+            float max = 0.0f;
+
+            for (size_t b = 0; b < bl; ++b) {
+                const float src0_0 = src_ptr[block_idx * bl + b];
+                const float asrc0_0 = fabsf(src0_0);
+
+                if (amax < asrc0_0) {
+                    amax = asrc0_0;
+                    max = src0_0;
+                }
+            }
+
+            const float scale = max / -8.0;
+            const float recip_scale = scale ? 1.0f / scale : 0.0f;
+
+            // Store the scale at the beginning of the block
+            *((uint16_t*)dst_ptr) = kai_cast_f16_f32(scale);
+            dst_ptr += sizeof(uint16_t);
+
+            const size_t block_size = 32;
+            const size_t num_subblocks = bl / 32;
+
+            for (size_t subblock_idx = 0; subblock_idx < num_subblocks; ++subblock_idx) {
+                for (size_t i = 0; i < block_size / 2; ++i) {
+                    const size_t src_base_addr = block_idx * bl + i + subblock_idx * block_size;
+                    float v0_f32 = src_ptr[src_base_addr];
+                    float v1_f32 = src_ptr[src_base_addr + block_size / 2];
+
+                    v0_f32 *= recip_scale;
+                    v1_f32 *= recip_scale;
+
+                    const uint8_t v0_u8 = (uint8_t)std::min((int8_t)15, (int8_t)(v0_f32 + 8.5f));
+                    const uint8_t v1_u8 = (uint8_t)std::min((int8_t)15, (int8_t)(v1_f32 + 8.5f));
+
+                    const uint8_t rhs_v0 = (v1_u8 << 4) | v0_u8;
+
+                    dst_ptr[0] = rhs_v0;
+                    dst_ptr += sizeof(uint8_t);
+                }
+            }
+        }
+    }
+}
 
 ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
     // Transpose and reorder
-    // if (key == W::lm_head) {
-    //     return transposeWeight(input);
-    // }
-    // if (key == W::lm_head) {
-    //     return prepareKaiWeightBf16(transposeWeight(input), true);
-    // }
+    if (key == W::lm_head) {
+        return prepareKaiWeightA8w4_1x4(input, true);
+    }
 
     // // Reorder RHS weight matrics for better GEMM performance
     if (key == W::attn_qkv_w ||
@@ -34,8 +102,7 @@ ConstBufferPtr prepareGemmWeight(const std::string& key, ConstBufferPtr input) {
         key == W::ffn_w1 ||
         key == W::ffn_w2 ||
         key == W::ffn_w3) {
-        return transposeWeight(input);
-    //     return prepareKaiWeightBf16(input);
+        return prepareKaiWeightA8w4_1x4(transposeWeight(input));
     }
 
     return input;
@@ -152,6 +219,79 @@ BufferPtr prepareKaiWeightBf16(ConstBufferPtr input, bool isTranspose) {
 
         delete[] bias;
         return output;
+}
+
+BufferPtr prepareKaiWeightA8w4_1x4(ConstBufferPtr input, bool isTranspose) {
+
+    std::vector<size_t> Bshape = input->shape();
+    auto dim = input->dim();
+    size_t k;
+    size_t n;
+
+    if (isTranspose) {
+        n = Bshape[dim - 2];
+        k = Bshape[dim - 1];
+    } else {
+        k = Bshape[dim - 2];
+        n = Bshape[dim - 1];
+    }
+    const size_t bl = 32;
+    const size_t num_blocks = k / bl;
+    const size_t num_bytes_per_block_qs4c32 = (bl / 2) + sizeof(int16_t);
+    const size_t rhs_native_size_qs4c32 = n * num_blocks * num_bytes_per_block_qs4c32;
+
+    const size_t nr = kai_get_nr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+    const size_t kr = kai_get_kr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+    const size_t sr = kai_get_sr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
+
+    // In a single row, we pack nr bias values followed by K rows of nr RHS values
+    const size_t rhs_packed_size = kai_get_rhs_packed_size_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n, k, nr, kr, bl);
+
+    uint8_t* rhs_packed_mtx_qs4c32 = new uint8_t[rhs_packed_size];
+
+    std::vector<size_t> weight_workspace_shape = std::vector<size_t>(Bshape.begin(), Bshape.end() - 2);
+
+    if (isTranspose)
+        weight_workspace_shape.insert(weight_workspace_shape.end(), {n, k});
+    else
+        weight_workspace_shape.insert(weight_workspace_shape.end(), {k, n});
+    BufferPtr output = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                    DataType::TYPE_UINT8,
+                                                    weight_workspace_shape,
+                                                    rhs_packed_mtx_qs4c32));
+
+    // const size_t rhs_stride = n * sizeof(float);
+    float* rhs = (float* )input->data();
+
+    uint8_t* rhs_native_mtx_qs4c32 = new uint8_t[rhs_native_size_qs4c32];
+
+    quant_qs4c32_f32(
+        n, k, bl, (const float*)rhs, (uint8_t*)rhs_native_mtx_qs4c32);
+
+    struct kai_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0_params kai_rhs_params;
+    kai_rhs_params.lhs_zero_point = 1;
+    kai_rhs_params.rhs_zero_point = 8;
+
+    // Packing only needs to be performed once if the contents of the bias and RHS matrices are expected to be constant.
+    int n_step = n;
+    #pragma omp parallel for
+    for (int n_start = 0; n_start < n; n_start += n_step) {
+        // const size_t rhs_offset = kai_get_rhs_offset_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n_start, rhs_stride);
+        // const size_t packed_offset = kai_get_rhs_packed_offset_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n_start, k, nr, kr, bl);
+
+        int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
+        kai_run_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(
+            1, tile_n, k,                             // Dimensions
+            nr, kr, sr,                               // Packing arguments
+            bl,                                       // Block length
+            (const uint8_t*)(rhs_native_mtx_qs4c32 + 0),  // RHS
+            NULL,                                     // Bias
+            ((uint8_t*)rhs_packed_mtx_qs4c32 + 0),                    // RHS packed
+            0, &kai_rhs_params);
+    }
+
+    delete[] rhs_native_mtx_qs4c32;
+    return output;
 }
 
 BufferPtr prepareGemmOptWeight(ConstBufferPtr input, bool isTranspose) {

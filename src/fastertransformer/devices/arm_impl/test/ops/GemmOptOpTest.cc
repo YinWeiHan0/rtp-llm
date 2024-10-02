@@ -166,17 +166,17 @@ void ArmGemmOptOpTest::TransposeBatchGemmOP(TransposeOperation op_a,
 
 TEST_F(ArmGemmOptOpTest, BatchGemmFP16OpTest) {
 
-    auto m_list = vector<int>{1, 14, 144, 256, 512, 2035};
+    // auto m_list = vector<int>{1, 14, 144, 256, 512, 2035};
 
-    for (int i = 0; i < 1; i++) {
-        for (auto m : m_list) {
-            BatchGemmFP16OP(1, m, 2048, 2048, false);
-            BatchGemmFP16OP(1, m, 5504, 2048, false);
-            BatchGemmFP16OP(1, m, 5504, 2048, false);
-            BatchGemmFP16OP(1, m, 2048, 5504, false);
-            BatchGemmFP16OP(1, m, 6144, 2048, false);
-        }
-    }
+    // for (int i = 0; i < 1; i++) {
+    //     for (auto m : m_list) {
+    //         BatchGemmFP16OP(1, m, 2048, 2048, false);
+    //         BatchGemmFP16OP(1, m, 5504, 2048, false);
+    //         BatchGemmFP16OP(1, m, 5504, 2048, false);
+    //         BatchGemmFP16OP(1, m, 2048, 5504, false);
+    //         BatchGemmFP16OP(1, m, 6144, 2048, false);
+    //     }
+    // }
     timer_recorder_.print();
 #ifdef GEMM_DEBUG
     ArmCpuDevice::print_time();

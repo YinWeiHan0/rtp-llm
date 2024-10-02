@@ -366,7 +366,7 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked
     return output;
 }
 
-BufferPtr ArmCpuDevice::gemm_kai_a8w4_1x4(const GemmParams& params) {
+BufferPtr ArmCpuDevice::gemm_kai_a8w4_1x4(const GemmParams& params, bool isRhsPacked) {
 
     auto start = std::chrono::high_resolution_clock::now();
     params.check();
@@ -428,7 +428,7 @@ BufferPtr ArmCpuDevice::gemm_kai_a8w4_1x4(const GemmParams& params) {
     const size_t sr = kai_get_sr_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod();
 
     const size_t lhs_stride = k * sizeof(float);
-    // const size_t rhs_stride = n * sizeof(float);
+    const size_t rhs_stride = n * sizeof(float);
     const size_t dst_stride_row = n * sizeof(float);
     const size_t dst_stride_col = sizeof(float);
 
@@ -442,63 +442,89 @@ BufferPtr ArmCpuDevice::gemm_kai_a8w4_1x4(const GemmParams& params) {
 
     const size_t rhs_packed_size =
             kai_get_rhs_packed_size_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n, k, nr, kr, bl);
-    uint8_t* rhs_packed_mtx_qs4c32 = new uint8_t[rhs_packed_size];
-
+    uint8_t* rhs_packed_mtx_qs4c32;
+    uint8_t* rhs_native_mtx_qs4c32;
     float* lhs = (float* )params.A.data();
-    float* rhs = (float* )params.B.data();
-
-    // uint8_t* rhs_packed = (uint8_t* )params.B.data();
-
-    uint8_t* rhs_native_mtx_qs4c32 = new uint8_t[rhs_native_size_qs4c32];
-
-    quant_qs4c32_f32(
-        n, k, bl, (const float*)rhs, (uint8_t*)rhs_native_mtx_qs4c32);
-
-    struct kai_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0_params kai_rhs_params;
-    kai_rhs_params.lhs_zero_point = 1;
-    kai_rhs_params.rhs_zero_point = 8;
+    
     // RHS packing
-    kai_run_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(
-        1, n, k,                                  // Dimensions
-        nr, kr, sr,                               // Packing arguments
-        bl,                                       // Block length
-        (const uint8_t*)(rhs_native_mtx_qs4c32),  // RHS
-        NULL,                                     // Bias
-        rhs_packed_mtx_qs4c32,                    // RHS packed
-        0, &kai_rhs_params);
+    int n_step = nr;
+    if (isRhsPacked) {
+        rhs_packed_mtx_qs4c32 = (uint8_t*)params.B.data();
+    } else {
+        float* rhs = (float* )params.B.data();
+        rhs_packed_mtx_qs4c32 = new uint8_t[rhs_packed_size];
+        rhs_native_mtx_qs4c32 = new uint8_t[rhs_native_size_qs4c32];
+
+        quant_qs4c32_f32(
+            n, k, bl, (const float*)rhs, (uint8_t*)rhs_native_mtx_qs4c32);
+
+        struct kai_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0_params kai_rhs_params;
+        kai_rhs_params.lhs_zero_point = 1;
+        kai_rhs_params.rhs_zero_point = 8;
+
+        #pragma omp parallel for
+        for (int n_start = 0; n_start < n; n_start += n_step) {
+            const size_t rhs_offset = kai_get_rhs_offset_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n_start, rhs_stride);
+            const size_t packed_offset = kai_get_rhs_packed_offset_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(n_start, k, nr, kr, bl);
+
+            int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
+
+            kai_run_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0(
+                1, tile_n, k,                                  // Dimensions
+                nr, kr, sr,                               // Packing arguments
+                bl,                                       // Block length
+                (const uint8_t*)(rhs_native_mtx_qs4c32 + rhs_offset),  // RHS
+                NULL,                                     // Bias
+                ((uint8_t*)rhs_packed_mtx_qs4c32 + packed_offset),                    // RHS packed
+                0, &kai_rhs_params);
+        }
+    }
 
     // LHS packing
-    kai_run_lhs_quant_pack_qsi8d32p_f32(
-        m, k, bl, mr, kr, sr, 0,               // Packing arguments
-        (const float*)lhs,                  // LHS
-        lhs_stride,                 // LHS stride
-        lhs_packed_mtx_qs8d32);             // LHS packed
+    int m_step = mr;
+    #pragma omp parallel for
+    for (int m_start = 0; m_start < m; m_start += m_step) {
+        const size_t lhs_offset = kai_get_lhs_offset_lhs_quant_pack_qsi8d32p_f32(m_start, lhs_stride);
+        const size_t lhs_packed_offset = kai_get_lhs_packed_offset_lhs_quant_pack_qsi8d32p_f32(m_start, k, bl, mr, kr, sr);
+        int tile_m = (m_start + m_step <= m) ? m_step : m - m_start;
+
+        kai_run_lhs_quant_pack_qsi8d32p_f32(
+            tile_m, k, bl, mr, kr, sr, 0,               // Packing arguments
+            (const float*)((uint8_t*)lhs + lhs_offset),                  // LHS
+            lhs_stride,                 // LHS stride
+            ((uint8_t*)lhs_packed_mtx_qs8d32 + lhs_packed_offset));             // LHS packed
+    }
 
     // Matmul
-    const size_t dst_stride = n * sizeof(float);
-    const size_t lhs_offset = kai_get_lhs_packed_offset_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(0, k, bl);
-    const size_t rhs_offset = kai_get_rhs_packed_offset_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(0, k, bl);
-    const size_t dst_offset = kai_get_dst_offset_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(0, 0, dst_stride); // FIXME with dst_stride?
+    #pragma omp parallel for
+    for (int n_start = 0; n_start < n; n_start += n_step) {
+        const size_t dst_stride = n * sizeof(float);
+        const size_t lhs_offset = kai_get_lhs_packed_offset_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(0, k, bl);
+        const size_t rhs_offset = kai_get_rhs_packed_offset_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(n_start, k, bl);
+        const size_t dst_offset = kai_get_dst_offset_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(0, n_start, dst_stride); // FIXME with dst_stride?
 
-    const void* lhs_ptr = (const void*)((const char *)lhs_packed_mtx_qs8d32 + lhs_offset);
-    const void* rhs_ptr = (const void*)((const char *)rhs_packed_mtx_qs4c32 + rhs_offset);
-    float* dst_ptr = (float*)((uint8_t*)output->data() + dst_offset);
+        const void* lhs_ptr = (const void*)((const char *)lhs_packed_mtx_qs8d32 + lhs_offset);
+        const void* rhs_ptr = (const void*)((const char *)rhs_packed_mtx_qs4c32 + rhs_offset);
+        float* dst_ptr = (float*)((uint8_t*)output->data() + dst_offset);
 
-    kai_run_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(
-        m, n, k,           // Dimensions
-        bl,
-        lhs_ptr,           // LHS packed
-        rhs_ptr,           // RHS packed
-        dst_ptr,           // DST
-        dst_stride_row,        // DST stride (row)
-        dst_stride_col,     // DST stride (col)
-        -FLT_MAX, FLT_MAX  // Min and max for the clamp operation
-    );
+        int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
+        kai_run_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod(
+            m, tile_n, k,           // Dimensions
+            bl,
+            lhs_ptr,           // LHS packed
+            rhs_ptr,           // RHS packed
+            dst_ptr,           // DST
+            dst_stride_row,        // DST stride (row)
+            dst_stride_col,     // DST stride (col)
+            -FLT_MAX, FLT_MAX  // Min and max for the clamp operation
+        );
+    }
 
     delete[] lhs_packed_mtx_qs8d32;
-    delete[] rhs_packed_mtx_qs4c32;
-    delete[] rhs_native_mtx_qs4c32;
-
+    if (!isRhsPacked) {
+        delete[] rhs_native_mtx_qs4c32;
+        delete[] rhs_packed_mtx_qs4c32;
+    }
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();
     printf("gemm_kai_a8w4_1x4 m,n,k %ld %ld %ld %.3f\n", m, n, k, during_time * 1000);
