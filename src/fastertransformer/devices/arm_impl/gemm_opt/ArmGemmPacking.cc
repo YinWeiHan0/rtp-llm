@@ -13,9 +13,9 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/arm_impl/ArmDevice.h"
 #include "src/fastertransformer/models/W.h"
-#include "kai/ukernels/matmul/matmul_clamp_bf16_bf16_f32p/kai_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla.h"
-#include "kai/ukernels/matmul/matmul_clamp_bf16_bf16_f32p/kai_matmul_clamp_bf16_bf16_f32p_interface.h"
-#include "kai/ukernels/matmul/pack/kai_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_bf16p_bf16p/kai_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_bf16p_bf16p/matmul_clamp_f32_bf16p_bf16p_interface.h"
+#include "kai/ukernels/matmul/pack/kai_rhs_pack_kxn_f32p4x12biasf32_f32_bf16_neon.h"
 
 #include "kai/ukernels/matmul/pack/kai_lhs_quant_pack_qsi8d32p_f32.h"
 #include "kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod.h"
@@ -172,12 +172,12 @@ BufferPtr prepareKaiWeightBf16(ConstBufferPtr input, bool isTranspose) {
         k = Bshape[dim - 2];
         n = Bshape[dim - 1];
 
-        const size_t nr = kai_get_nr_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla();
-        const size_t kr = kai_get_kr_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla();
-        const size_t sr = kai_get_sr_matmul_clamp_bf16_bf16_f32p12x1biasf32_8x12x4_neon_mmla();
+        const size_t nr = kai_get_nr_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla();
+        const size_t kr = kai_get_kr_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla();
+        const size_t sr = kai_get_sr_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla();
 
         // In a single row, we pack nr bias values followed by K rows of nr RHS values
-        const size_t rhs_packed_size = kai_get_rhs_packed_size_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n, k);
+        const size_t rhs_packed_size = kai_get_rhs_packed_size_rhs_pack_kxn_f32p4x12biasf32_f32_bf16_neon(n, k);
 
         bfloat16_t* rhs_packed = new bfloat16_t[rhs_packed_size];
 
@@ -202,12 +202,12 @@ BufferPtr prepareKaiWeightBf16(ConstBufferPtr input, bool isTranspose) {
         int n_step = nr;
         #pragma omp parallel for
         for (int n_start = 0; n_start < n; n_start += n_step) {
-            const size_t rhs_offset = kai_get_rhs_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
-            const size_t bias_offset = kai_get_bias_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start);
-            const size_t packed_offset = kai_get_rhs_packed_offset_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(n_start, k);
+            const size_t rhs_offset = kai_get_rhs_offset_rhs_pack_kxn_f32p4x12biasf32_f32_bf16_neon(n_start);
+            const size_t bias_offset = kai_get_bias_offset_rhs_pack_kxn_f32p4x12biasf32_f32_bf16_neon(n_start);
+            const size_t packed_offset = kai_get_rhs_packed_offset_rhs_pack_kxn_f32p4x12biasf32_f32_bf16_neon(n_start, k);
 
             int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
-            kai_run_matmul_transpose_pack_rhs_bias_bf16p16x4zf32_bf16_f32_neon_nr_12(
+            kai_run_rhs_pack_kxn_f32p4x12biasf32_f32_bf16_neon(
                 1, tile_n, k, nr, kr, sr,  // Packing arguments
                 rhs_stride,           // RHS stride
                 ((uint8_t*)rhs + rhs_offset),                  // RHS
