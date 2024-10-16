@@ -5,6 +5,12 @@
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include <openblas/cblas.h>
 
+#include <cfloat>
+#include "kai/ukernels/matmul/matmul_clamp_f32_bf16p_bf16p/kai_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla.h"
+#include "kai/ukernels/matmul/matmul_clamp_f32_bf16p_bf16p/matmul_clamp_f32_bf16p_bf16p_interface.h"
+#include "kai/ukernels/matmul/pack/kai_rhs_pack_kxn_f32p4x12biasf32_f32_bf16_neon.h"
+#include "kai/ukernels/matmul/pack/kai_lhs_pack_f32p8x4_bf16_neon.h"
+
 namespace fastertransformer {
 
 /* Input has shape [dim0, dim1, dim2, dim3] */
@@ -160,6 +166,13 @@ void ArmCpuDevice::halfRopeQK(void *qkv, int batch, int seq_len, int num_heads, 
 void ArmCpuDevice::printStat() {
     for (int i = 0; i < sizeof(a_cnt_) / sizeof(uint64_t); i++) {
         std::cout << "$$$   [" << i << "] time (us) - min: " << a_tmin_[i] << " ; max: " << a_tmax_[i] << " ; ave: " << a_tave_[i] / a_cnt_[i] << std::endl;
+    }
+
+    for (int i = 0; i < sizeof(a_cnt_) / sizeof(uint64_t); i++) {
+        a_tmin_[i] = 999999999;
+        a_tmax_[i] = 0;
+        a_tave_[i] = 0;
+        a_cnt_[i] = 0;
     }
 }
 
@@ -563,8 +576,8 @@ void ArmCpuDevice::runOneBatchStride(const AttentionModuleParams& params, size_t
 
     auto qk_output = allocateBuffer({datatype, {1, head_num, seq_len, step + 1}, AllocationType::HOST}, {"qk_output"});
     const int stride_q = (head_num + 2 * kv_head_num) * size_per_head;
-    const int N = 1 * head_num;
-    parallel_for(N, [&](int tid) {
+    const int MHA_HEADS = 1 * head_num;
+    parallel_for(MHA_HEADS, [&](int tid) {
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, seq_len, step + 1, size_per_head, 1.0,
             (const float*)q_array[tid], stride_q,
             (const float*)k_array[tid], stride_kv, 0.0,
@@ -598,13 +611,62 @@ void ArmCpuDevice::runOneBatchStride(const AttentionModuleParams& params, size_t
     printBufferData(*softmax_qk_output, "softmax_qk_output");
 
     tStart = std::chrono::steady_clock::now();
-    const int NN = 1 * head_num;
-    parallel_for(NN, [&](int tid) {
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, seq_len, size_per_head, step + 1, 1.0,
-            (const float*)softmax_qk_output->dataWithOffset(tid * seq_len * (step + 1)), step + 1,
-            (const float*)v_array[tid], stride_kv, 0.0,
-            (float*)params.output.dataWithOffset(past_seq * head_num * size_per_head + tid * size_per_head), head_num * size_per_head);
-    });
+    if (seq_len == 1) {
+        /* Decoder has higher performance with cblas for gemm. */
+        parallel_for(MHA_HEADS, [&](int tid) {
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, seq_len, size_per_head, step + 1, 1.0,
+                (const float*)softmax_qk_output->dataWithOffset(tid * seq_len * (step + 1)), step + 1,
+                (const float*)v_array[tid], stride_kv, 0.0,
+                (float*)params.output.dataWithOffset(past_seq * head_num * size_per_head + tid * size_per_head), head_num * size_per_head);
+        });
+    } else {
+        /* Context has higher performance with KleidiAI for gemm. */
+        const size_t bias_size = size_per_head;
+        float* bias = new float[bias_size];
+        memset(bias, 0, bias_size * sizeof(float));
+        const size_t M = seq_len;
+        const size_t N = size_per_head;
+        const size_t K = step + 1;
+        const size_t mr = kai_get_mr_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla();
+        const size_t nr = kai_get_nr_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla();
+        const size_t kr = kai_get_kr_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla();
+        const size_t sr = kai_get_sr_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla();
+        const size_t lhs_packed_size = kai_get_lhs_packed_size_lhs_pack_f32p8x4_bf16_neon(M, K, mr, kr, sr);
+        const size_t rhs_packed_size = kai_get_rhs_packed_size_rhs_pack_kxn_f32p4x12biasf32_f32_bf16_neon(N, K);
+        bfloat16_t *lhs_packed = new bfloat16_t[lhs_packed_size];
+        bfloat16_t *rhs_packed = new bfloat16_t[rhs_packed_size];
+        const size_t lhs_stride = K * sizeof(float);
+        const size_t rhs_stride = stride_kv * sizeof(float);
+        const size_t dst_stride_row = (head_num * size_per_head) * sizeof(float);
+        const size_t dst_stride_col = sizeof(float);
+
+        parallel_for(MHA_HEADS, [&](int tid) {
+            kai_run_lhs_pack_f32p8x4_bf16_neon(M, K, mr, kr, sr, 0,
+                (const void*)softmax_qk_output->dataWithOffset(tid * M * K), lhs_stride, lhs_packed);
+            kai_run_rhs_pack_kxn_f32p4x12biasf32_f32_bf16_neon(1,
+                N,
+                K,
+                nr,
+                kr,
+                sr,
+                rhs_stride,
+                (const void*)v_array[tid],
+                bias,
+                NULL,
+                rhs_packed,
+                0,
+                NULL);
+            kai_run_matmul_clamp_f32_bf16p_bf16p12x1biasf32_8x12x4_neon_mmla(M, N, K,
+                lhs_packed,
+                rhs_packed,
+                (void*)params.output.dataWithOffset(past_seq * head_num * size_per_head + tid * size_per_head), dst_stride_row, dst_stride_col,
+                -FLT_MAX, FLT_MAX);
+        });
+
+        delete[] bias;
+        delete[] rhs_packed;
+        delete[] lhs_packed;
+    }
     tEnd = std::chrono::steady_clock::now();
     diff = std::chrono::duration_cast<std::chrono::microseconds>(tEnd - tStart);
     logTime(diff, 6);
@@ -614,7 +676,7 @@ void ArmCpuDevice::runOneBatchStride(const AttentionModuleParams& params, size_t
     diff = std::chrono::duration_cast<std::chrono::microseconds>(tEnd - tStart);
     logTime(diff, 7);
 
-    // /* Print profile data at the end of operator unit test. */
+    /* Print profile data at the end of operator unit test. */
     // if (a_cnt_[0] == 24)
     //     printStat();
 }
@@ -627,6 +689,7 @@ AttentionModuleOutput ArmCpuDevice::contextAttention(const AttentionModuleParams
     if (params.input.type() == DataType::TYPE_FP32) {
         for (int batch = 0; batch < batch_size; batch++) {
             size_t context_len = *static_cast<int*>(params.common.input_lengths.dataWithOffset(decoder_batch + batch));
+            // printf("###Context - len: %ld\n", context_len);
             runOneBatchStride(params, past_seq, batch, context_len, 0);
             past_seq += context_len;
         }
@@ -648,6 +711,7 @@ AttentionModuleOutput ArmCpuDevice::decoderSelfAttention(const AttentionModulePa
     if (params.input.type() == DataType::TYPE_FP32) {
         for (int batch = 0; batch < batch_size; batch++) {
             size_t step = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
+            // printf("###Decoder - step: %ld\n", step);
             runOneBatchStride(params, batch, batch, 1, step);
         }
     } else if (params.input.type() == DataType::TYPE_FP16) {
