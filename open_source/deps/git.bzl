@@ -149,7 +149,7 @@ def git_deps():
     new_git_repository(
         name = "KleidiAI",
         remote = "https://git.gitlab.arm.com/kleidi/kleidiai.git",
-        commit = "c6d41ecf59c9bdad1a96420fa15c4144a2950530",
+        commit = "9783a5a7b71076b0f9f2e3ff55cb31dd20894880",
         # patches = ["//patches/kleidiai:0001-fix-bf16-bazel-build-path.patch"],
     )
 
