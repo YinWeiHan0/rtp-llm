@@ -33,9 +33,8 @@ BufferPtr ArmCpuDevice::gemm_opt(const GemmParams& params) {
 
 #ifdef GEMM_DEBUG
     Timer timer;
-    
-#endif
     auto start = std::chrono::high_resolution_clock::now();
+#endif
 
     params.check();
 
@@ -172,10 +171,10 @@ BufferPtr ArmCpuDevice::gemm_opt(const GemmParams& params) {
         }
     }
 
+#ifdef GEMM_DEBUG
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();
     printf("gemm_opt b,m,n,k %ld %ld %ld %ld %.3f\n", batch_size, m, n, k, during_time * 1000);
-#ifdef GEMM_DEBUG
 #endif
     return output;
 }

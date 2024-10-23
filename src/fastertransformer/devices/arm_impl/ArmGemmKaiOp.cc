@@ -89,9 +89,9 @@ static void quant_qs4c32_f32(size_t n, size_t k, size_t bl, const float* rhs_f32
 }
 
 BufferPtr ArmCpuDevice::gemm_kai_fp32(const GemmParams& params) {
-
+#ifdef GEMM_DEBUG
     auto start = std::chrono::high_resolution_clock::now();
-
+#endif
     params.check();
 
     std::vector<size_t> Ashape;
@@ -196,10 +196,11 @@ BufferPtr ArmCpuDevice::gemm_kai_fp32(const GemmParams& params) {
         delete[] bias;
         delete[] rhs_packed;
     }
-
+#ifdef GEMM_DEBUG
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();
     printf("gemm_kai_fp32 m,n,k %ld %ld %ld %.3f\n", m, n, k, during_time * 1000);
+#endif
     return output;
 }
 
@@ -209,9 +210,9 @@ BufferPtr ArmCpuDevice::gemm_kai_fp32(const GemmParams& params) {
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked) {
-
+#ifdef GEMM_DEBUG
     auto start = std::chrono::high_resolution_clock::now();
-
+#endif
     params.check();
 
     std::vector<size_t> Ashape;
@@ -358,16 +359,18 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked
         delete[] bias;
         delete[] rhs_packed;
     }
-
+#ifdef GEMM_DEBUG
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();
     printf("gemm_kai_bf16 m,n,k %ld %ld %ld %.3f\n", m, n, k, during_time * 1000);
+#endif
     return output;
 }
 
 BufferPtr ArmCpuDevice::gemm_kai_a8w4_1x4(const GemmParams& params, bool isRhsPacked) {
-
+#ifdef GEMM_DEBUG
     auto start = std::chrono::high_resolution_clock::now();
+#endif
     params.check();
 
     std::vector<size_t> Ashape;
@@ -524,9 +527,11 @@ BufferPtr ArmCpuDevice::gemm_kai_a8w4_1x4(const GemmParams& params, bool isRhsPa
         delete[] rhs_native_mtx_qs4c32;
         delete[] rhs_packed_mtx_qs4c32;
     }
+#ifdef GEMM_DEBUG
     auto end = std::chrono::high_resolution_clock::now();
     float during_time = std::chrono::duration<float>(end - start).count();
     printf("gemm_kai_a8w4_1x4 m,n,k %ld %ld %ld %.3f\n", m, n, k, during_time * 1000);
+#endif
     return output;
 }
 
