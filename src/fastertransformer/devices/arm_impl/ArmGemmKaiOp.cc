@@ -285,7 +285,7 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked
     // Packing only needs to be performed once if the contents of the bias and RHS matrices are expected to be constant.
     int n_step = nr;
     if (!isRhsPacked) {
-        const size_t rhs_packed_size = kai_get_rhs_packed_size_rhs_pack_kxn_f32p8x1biasf32_f32_f32_neon(n, k);
+        const size_t rhs_packed_size = kai_get_rhs_packed_size_rhs_quant_pack_kxn_bf16pbiasf32_f32_neon(n, k, nr, kr);
         rhs_packed = new bfloat16_t[rhs_packed_size];
 
         const size_t bias_size = n;
@@ -294,12 +294,12 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked
 
         #pragma omp parallel for
         for (int n_start = 0; n_start < n; n_start += n_step) {
-            const size_t rhs_offset = kai_get_rhs_offset_rhs_pack_kxn_f32p8x1biasf32_f32_f32_neon(n_start);
-            const size_t bias_offset = kai_get_bias_offset_rhs_pack_kxn_f32p8x1biasf32_f32_f32_neon(n_start);
-            const size_t packed_offset = kai_get_rhs_packed_offset_rhs_pack_kxn_f32p8x1biasf32_f32_f32_neon(n_start, k);
+            const size_t rhs_offset = kai_get_rhs_offset_rhs_quant_pack_kxn_bf16pbiasf32_f32_neon(n_start);
+            const size_t bias_offset = kai_get_bias_offset_rhs_quant_pack_kxn_bf16pbiasf32_f32_neon(n_start);
+            const size_t packed_offset = kai_get_rhs_packed_offset_rhs_quant_pack_kxn_bf16pbiasf32_f32_neon(n_start, k, nr, kr);
 
             int tile_n = (n_start + n_step <= n) ? n_step : n - n_start;
-            kai_run_rhs_pack_kxn_f32p8x1biasf32_f32_f32_neon(
+            kai_run_rhs_quant_pack_kxn_bf16pbiasf32_f32_neon(
                 1, tile_n, k, nr, kr, sr,  // Packing arguments
                 rhs_stride,           // RHS stride
                 ((uint8_t*)rhs + rhs_offset),                  // RHS
@@ -332,7 +332,7 @@ BufferPtr ArmCpuDevice::gemm_kai_bf16(const GemmParams& params, bool isRhsPacked
     #pragma omp parallel for
     for (int n_start = 0; n_start < n; n_start += n_step) {
         size_t lhs_offset = kai_get_lhs_offset_lhs_quant_pack_bf16p_f32_neon(0, k);
-        size_t rhs_offset = kai_get_rhs_packed_offset_rhs_pack_kxn_f32p8x1biasf32_f32_f32_neon(n_start, k);
+        size_t rhs_offset = kai_get_rhs_packed_offset_rhs_quant_pack_kxn_bf16pbiasf32_f32_neon(n_start, k, nr, kr);
         size_t dst_offset = kai_get_dst_offset_matmul_clamp_f32_bf16p_bf16p12x4b_8x12x4_neon_mmla(0, n_start, n * sizeof(bfloat16_t));
 
         const void* lhs_ptr = (const void*)((const char *)lhs_packed + lhs_offset);
