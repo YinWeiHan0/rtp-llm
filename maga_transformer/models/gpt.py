@@ -138,7 +138,7 @@ class GPT(BaseModel):
                 tensors = model_weights_loader.load_tensor(name)
                 if len(tensors) != 1:
                     raise Exception(f"load tensor {name} failed, get len=={len(tensors)}")
-                loaded_tensor = tensors[0].cuda()
+                loaded_tensor = tensors[0].to(self.device)
                 tensor_map[name] = loaded_tensor
                 self.weight.append_global_weight(name, loaded_tensor)
             self.custom_module.handler.init(tensor_map)
@@ -221,13 +221,13 @@ class GPT(BaseModel):
                 assert pos_weight is not None, "positional embedding weight not found"
                 if pos_weight.shape[0] < self.config.max_seq_len:
                     raise Exception(f"positon_weight has shape: {pos_weight.shape}, but max_seq_len is: {self.config.max_seq_len} > {pos_weight.shape[0]}")
-                pos_weight = pos_weight[:self.config.max_seq_len].cuda()
+                pos_weight = pos_weight[:self.config.max_seq_len].to(self.device)
                 self.position_encoding.set_weight(pos_weight)
                 self.weight.append_global_weight(W.positional_embedding, self.position_encoding._emb)
             if self.token_type_embeddings is not None:
                 token_type_weight = self.weight.steal_pytorch_weight(W.token_type_embedding)
                 assert token_type_weight is not None, "token_type embedding weight not found"
-                self.token_type_embeddings.set_weight(token_type_weight.cuda())
+                self.token_type_embeddings.set_weight(token_type_weight.to(self.device))
                 self.weight.append_global_weight(W.token_type_embedding, self.token_type_embeddings._emb)
             if self.pre_decoder_layernorm is not None:
                 self._safe_load_from_module(self.pre_decoder_layernorm.weight, W.pre_decoder_ln_gamma)
@@ -255,7 +255,8 @@ class GPT(BaseModel):
         self.init_word_embedding_weight()
         self.init_lm_head_weight()
         self.init_pipeline_weight()
-        torch.cuda.empty_cache()
+        if self.device != 'cpu':
+            torch.cuda.empty_cache()
 
     def update_pre_seq_len(self, config: GptInitModelParameters) -> None:
         config_json_path = os.path.join(config.ckpt_path, "config.json")
